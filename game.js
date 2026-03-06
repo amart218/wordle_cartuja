@@ -1,24 +1,28 @@
 // =============================================================
 //  game.js — Lógica principal de WORDLE ES
-//  Validación de palabras via API de Wiktionary (español)
+//  - Palabra diaria: Google Apps Script (backend privado)
+//  - Validación de intentos: API de Wiktionary (español)
 // =============================================================
 
 (function () {
   "use strict";
 
   // ── Constantes ─────────────────────────────────────────────
-  const WORD_LENGTH    = 5;
-  const MAX_GUESSES    = 6;
-  const FLIP_DURATION  = 500; // ms por tile
-  const FLIP_DELAY     = 300; // ms entre tiles
-  const STORAGE_KEY    = "wordlees_state";
-  const STATS_KEY      = "wordlees_stats";
-  const CACHE_KEY      = "wordlees_wordcache";
+  const WORD_LENGTH   = 5;
+  const MAX_GUESSES   = 6;
+  const FLIP_DURATION = 500;
+  const FLIP_DELAY    = 300;
+  const STORAGE_KEY   = "wordlees_state";
+  const STATS_KEY     = "wordlees_stats";
+  const CACHE_KEY     = "wordlees_wordcache";
 
-  // Endpoint de Wiktionary en español (CORS-friendly, sin API key)
+  // ► Pega aquí la URL de tu Google Apps Script desplegado
+  const DAILY_API_URL = "https://script.google.com/macros/s/TU_DEPLOYMENT_ID/exec";
+
+  // Wiktionary para validar intentos
   const WIKTIONARY_API = "https://es.wiktionary.org/w/api.php";
 
-  // ── Caché en memoria para no repetir consultas API ─────────
+  // ── Caché de validación (sessionStorage) ───────────────────
   let wordCache = {};
 
   function loadCache() {
@@ -34,7 +38,6 @@
 
   // ── Estado del juego ───────────────────────────────────────
   let state = {
-    wordIndex : 0,
     solution  : "",
     guesses   : [],
     currentRow: 0,
@@ -42,7 +45,7 @@
     gameOver  : false,
     won       : false,
     savedDate : "",
-    locked    : false,  // bloquea input mientras valida API
+    locked    : false,
   };
 
   // ── Stats ──────────────────────────────────────────────────
@@ -55,34 +58,60 @@
   };
 
   // ── Init ───────────────────────────────────────────────────
-  function init() {
+  async function init() {
     loadCache();
     loadStats();
-    const { index, solution } = getDailyWord();
-    state.wordIndex = index;
-    state.solution  = solution;
-
     buildBoard();
     attachKeyboard();
     document.addEventListener("keydown", handleKeyDown);
 
-    const saved = loadSavedState();
-    if (saved && saved.savedDate === getTodayStr()) {
-      restoreState(saved);
-    } else {
-      clearSavedState();
+    showLoadingScreen(true);
+
+    try {
+      const solution = await fetchDailyWord();
+      state.solution = solution;
+      showLoadingScreen(false);
+
+      const saved = loadSavedState();
+      if (saved && saved.savedDate === getTodayStr()) {
+        restoreState(saved);
+      } else {
+        clearSavedState();
+      }
+    } catch (err) {
+      showLoadingScreen(false);
+      showError("No se pudo cargar la palabra de hoy. Inténtalo de nuevo.");
+      console.error("Error cargando palabra diaria:", err);
     }
   }
 
-  // ── Palabra diaria ─────────────────────────────────────────
-  function getDailyWord() {
-    const start = new Date(START_DATE);
-    const today = new Date();
-    start.setHours(0,0,0,0);
-    today.setHours(0,0,0,0);
-    const diffDay = Math.floor((today - start) / 86400000);
-    const index   = ((diffDay % DAILY_WORDS.length) + DAILY_WORDS.length) % DAILY_WORDS.length;
-    return { index, solution: DAILY_WORDS[index] };
+  // ── Fetch palabra diaria desde Google Apps Script ──────────
+  async function fetchDailyWord() {
+    // Primero comprobamos si ya la tenemos en localStorage de hoy
+    const cached = loadSavedState();
+    if (cached && cached.savedDate === getTodayStr() && cached.solution) {
+      return cached.solution;
+    }
+
+    const res  = await fetch(DAILY_API_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.word) throw new Error("Respuesta inválida de la API");
+    return data.word.toUpperCase().trim();
+  }
+
+  // ── UI de carga ────────────────────────────────────────────
+  function showLoadingScreen(visible) {
+    let el = document.getElementById("loading-screen");
+    if (!el) return;
+    el.classList.toggle("hidden", !visible);
+  }
+
+  function showError(msg) {
+    let el = document.getElementById("error-screen");
+    if (!el) return;
+    el.querySelector(".error-msg").textContent = msg;
+    el.classList.remove("hidden");
   }
 
   function getTodayStr() {
@@ -123,7 +152,7 @@
   }
 
   function handleKey(key) {
-    if (state.gameOver || state.locked) return;
+    if (state.gameOver || state.locked || !state.solution) return;
     if (key === "ENTER")     return submitGuess();
     if (key === "BACKSPACE") return deleteLetter();
     if (/^[A-ZÁÉÍÓÚÑÜ]$/.test(key)) typeLetter(key);
@@ -159,7 +188,6 @@
       guess += getTile(state.currentRow, c).textContent;
     }
 
-    // Bloquear input durante la consulta
     state.locked = true;
     setLoadingRow(state.currentRow, true);
 
@@ -205,56 +233,35 @@
     });
   }
 
-  // ── Validación via Wiktionary API ──────────────────────────
+  // ── Validación via Wiktionary ──────────────────────────────
   async function isValidWord(word) {
     const normalized = word.toLowerCase();
-
-    // 1. Comprobar caché primero
     if (normalized in wordCache) return wordCache[normalized];
 
-    // 2. Las palabras diarias siempre son válidas
-    if (DAILY_WORDS.includes(word)) {
-      wordCache[normalized] = true;
-      saveCache();
-      return true;
-    }
-
-    // 3. Consultar Wiktionary español
     try {
       const params = new URLSearchParams({
         action : "query",
         titles : normalized,
-        format  : "json",
-        origin  : "*",        // necesario para CORS desde GitHub Pages
+        format : "json",
+        origin : "*",
       });
-
       const res  = await fetch(`${WIKTIONARY_API}?${params}`);
       if (!res.ok) throw new Error("network");
-
       const data  = await res.json();
       const pages = data?.query?.pages ?? {};
       const page  = Object.values(pages)[0];
-
-      // Wiktionary devuelve pageid -1 si la página no existe
       const exists = page && !("missing" in page);
-
       wordCache[normalized] = exists;
       saveCache();
       return exists;
-
-    } catch (err) {
-      // Si la API falla (sin conexión, etc.) aceptamos la palabra
-      // para no penalizar al jugador por problemas de red
-      console.warn("Wiktionary API error:", err);
-      return true;
+    } catch (_) {
+      return true; // Si falla la red, aceptamos la palabra
     }
   }
 
-  // Muestra indicador de carga en la fila mientras espera la API
   function setLoadingRow(row, loading) {
     for (let c = 0; c < WORD_LENGTH; c++) {
-      const tile = getTile(row, c);
-      tile.classList.toggle("loading", loading);
+      getTile(row, c).classList.toggle("loading", loading);
     }
   }
 
@@ -265,7 +272,6 @@
     const guestArr = guess.split("");
     const used     = Array(WORD_LENGTH).fill(false);
 
-    // 1ª pasada: correctos
     for (let i = 0; i < WORD_LENGTH; i++) {
       if (guestArr[i] === solArr[i]) {
         result[i] = "correct";
@@ -273,7 +279,6 @@
         solArr[i] = null;
       }
     }
-    // 2ª pasada: presentes
     for (let i = 0; i < WORD_LENGTH; i++) {
       if (result[i] === "correct") continue;
       const idx = solArr.findIndex((l, j) => l === guestArr[i] && !used[j]);
@@ -289,14 +294,10 @@
   // ── Animaciones ────────────────────────────────────────────
   function revealRow(row, guess, result, callback) {
     for (let c = 0; c < WORD_LENGTH; c++) {
-      const tile  = getTile(row, c);
-      const delay = c * FLIP_DELAY;
-      setTimeout(() => {
-        tile.classList.add("revealed", result[c]);
-      }, delay);
+      const tile = getTile(row, c);
+      setTimeout(() => tile.classList.add("revealed", result[c]), c * FLIP_DELAY);
     }
-    const total = (WORD_LENGTH - 1) * FLIP_DELAY + FLIP_DURATION;
-    setTimeout(callback, total);
+    setTimeout(callback, (WORD_LENGTH - 1) * FLIP_DELAY + FLIP_DURATION);
   }
 
   function shakeRow(row) {
@@ -323,8 +324,7 @@
   function updateKeyboard(guess, result) {
     const priority = { correct: 3, present: 2, absent: 1 };
     for (let i = 0; i < WORD_LENGTH; i++) {
-      const letter = guess[i];
-      const btn    = document.querySelector(`#keyboard button[data-key="${letter}"]`);
+      const btn = document.querySelector(`#keyboard button[data-key="${guess[i]}"]`);
       if (!btn) continue;
       const current = btn.dataset.state || "";
       if ((priority[result[i]] || 0) > (priority[current] || 0)) {
@@ -353,8 +353,8 @@
   }
 
   // ── Modals ─────────────────────────────────────────────────
-  window.openModal  = function(id) { document.getElementById(id).classList.remove("hidden"); };
-  window.closeModal = function(id) { document.getElementById(id).classList.add("hidden"); };
+  window.openModal  = id => document.getElementById(id).classList.remove("hidden");
+  window.closeModal = id => document.getElementById(id).classList.add("hidden");
 
   document.querySelectorAll(".modal").forEach(m => {
     m.addEventListener("click", e => { if (e.target === m) closeModal(m.id); });
@@ -441,7 +441,10 @@
   // ── Persistencia ───────────────────────────────────────────
   function saveState() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...state, savedDate: getTodayStr() }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        ...state,
+        savedDate: getTodayStr()
+      }));
     } catch (_) {}
   }
 
@@ -454,7 +457,10 @@
   }
 
   function restoreState(saved) {
-    state = { ...state, ...saved };
+    // Preservamos la solution ya cargada desde la API
+    const solution = state.solution;
+    state = { ...state, ...saved, solution };
+
     for (let r = 0; r < saved.guesses.length; r++) {
       const guess  = saved.guesses[r];
       const result = evaluateGuess(guess);
