@@ -166,6 +166,17 @@ main {
   animation: bounce 0.1s ease forwards;
 }
 
+/* Estado de carga mientras se consulta la API */
+.tile.loading {
+  animation: pulse 0.8s ease-in-out infinite;
+  border-color: var(--subtext);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.45; }
+}
+
 @keyframes bounce {
   0%,100% { transform: translateY(0); }
   40% { transform: translateY(-20px); }
