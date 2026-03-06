@@ -1,28 +1,48 @@
 // =============================================================
 //  game.js — Lógica principal de WORDLE ES
+//  Validación de palabras via API de Wiktionary (español)
 // =============================================================
 
 (function () {
   "use strict";
 
   // ── Constantes ─────────────────────────────────────────────
-  const WORD_LENGTH   = 5;
-  const MAX_GUESSES   = 6;
-  const FLIP_DURATION = 500; // ms por tile
-  const FLIP_DELAY    = 300; // ms entre tiles
-  const STORAGE_KEY   = "wordlees_state";
-  const STATS_KEY     = "wordlees_stats";
+  const WORD_LENGTH    = 5;
+  const MAX_GUESSES    = 6;
+  const FLIP_DURATION  = 500; // ms por tile
+  const FLIP_DELAY     = 300; // ms entre tiles
+  const STORAGE_KEY    = "wordlees_state";
+  const STATS_KEY      = "wordlees_stats";
+  const CACHE_KEY      = "wordlees_wordcache";
+
+  // Endpoint de Wiktionary en español (CORS-friendly, sin API key)
+  const WIKTIONARY_API = "https://es.wiktionary.org/w/api.php";
+
+  // ── Caché en memoria para no repetir consultas API ─────────
+  let wordCache = {};
+
+  function loadCache() {
+    try {
+      const raw = sessionStorage.getItem(CACHE_KEY);
+      if (raw) wordCache = JSON.parse(raw);
+    } catch (_) {}
+  }
+
+  function saveCache() {
+    try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(wordCache)); } catch (_) {}
+  }
 
   // ── Estado del juego ───────────────────────────────────────
   let state = {
     wordIndex : 0,
     solution  : "",
-    guesses   : [],       // array de strings
+    guesses   : [],
     currentRow: 0,
     currentCol: 0,
     gameOver  : false,
     won       : false,
     savedDate : "",
+    locked    : false,  // bloquea input mientras valida API
   };
 
   // ── Stats ──────────────────────────────────────────────────
@@ -36,6 +56,7 @@
 
   // ── Init ───────────────────────────────────────────────────
   function init() {
+    loadCache();
     loadStats();
     const { index, solution } = getDailyWord();
     state.wordIndex = index;
@@ -53,14 +74,13 @@
     }
   }
 
-  // ── Selección de palabra diaria ────────────────────────────
+  // ── Palabra diaria ─────────────────────────────────────────
   function getDailyWord() {
-    const start   = new Date(START_DATE);
-    const today   = new Date();
+    const start = new Date(START_DATE);
+    const today = new Date();
     start.setHours(0,0,0,0);
     today.setHours(0,0,0,0);
-    const diffMs  = today - start;
-    const diffDay = Math.floor(diffMs / 86400000);
+    const diffDay = Math.floor((today - start) / 86400000);
     const index   = ((diffDay % DAILY_WORDS.length) + DAILY_WORDS.length) % DAILY_WORDS.length;
     return { index, solution: DAILY_WORDS[index] };
   }
@@ -103,7 +123,7 @@
   }
 
   function handleKey(key) {
-    if (state.gameOver) return;
+    if (state.gameOver || state.locked) return;
     if (key === "ENTER")     return submitGuess();
     if (key === "BACKSPACE") return deleteLetter();
     if (/^[A-ZÁÉÍÓÚÑÜ]$/.test(key)) typeLetter(key);
@@ -127,7 +147,7 @@
   }
 
   // ── Submit ─────────────────────────────────────────────────
-  function submitGuess() {
+  async function submitGuess() {
     if (state.currentCol < WORD_LENGTH) {
       showToast("Faltan letras");
       shakeRow(state.currentRow);
@@ -139,14 +159,24 @@
       guess += getTile(state.currentRow, c).textContent;
     }
 
-    if (!ALL_VALID_WORDS.includes(guess)) {
-      showToast("Palabra no válida");
+    // Bloquear input durante la consulta
+    state.locked = true;
+    setLoadingRow(state.currentRow, true);
+
+    const valid = await isValidWord(guess);
+
+    setLoadingRow(state.currentRow, false);
+    state.locked = false;
+
+    if (!valid) {
+      showToast("Palabra no encontrada");
       shakeRow(state.currentRow);
       return;
     }
 
     state.guesses.push(guess);
     const result = evaluateGuess(guess);
+
     revealRow(state.currentRow, guess, result, () => {
       updateKeyboard(guess, result);
       const won = guess === state.solution;
@@ -175,6 +205,59 @@
     });
   }
 
+  // ── Validación via Wiktionary API ──────────────────────────
+  async function isValidWord(word) {
+    const normalized = word.toLowerCase();
+
+    // 1. Comprobar caché primero
+    if (normalized in wordCache) return wordCache[normalized];
+
+    // 2. Las palabras diarias siempre son válidas
+    if (DAILY_WORDS.includes(word)) {
+      wordCache[normalized] = true;
+      saveCache();
+      return true;
+    }
+
+    // 3. Consultar Wiktionary español
+    try {
+      const params = new URLSearchParams({
+        action : "query",
+        titles : normalized,
+        format  : "json",
+        origin  : "*",        // necesario para CORS desde GitHub Pages
+      });
+
+      const res  = await fetch(`${WIKTIONARY_API}?${params}`);
+      if (!res.ok) throw new Error("network");
+
+      const data  = await res.json();
+      const pages = data?.query?.pages ?? {};
+      const page  = Object.values(pages)[0];
+
+      // Wiktionary devuelve pageid -1 si la página no existe
+      const exists = page && !("missing" in page);
+
+      wordCache[normalized] = exists;
+      saveCache();
+      return exists;
+
+    } catch (err) {
+      // Si la API falla (sin conexión, etc.) aceptamos la palabra
+      // para no penalizar al jugador por problemas de red
+      console.warn("Wiktionary API error:", err);
+      return true;
+    }
+  }
+
+  // Muestra indicador de carga en la fila mientras espera la API
+  function setLoadingRow(row, loading) {
+    for (let c = 0; c < WORD_LENGTH; c++) {
+      const tile = getTile(row, c);
+      tile.classList.toggle("loading", loading);
+    }
+  }
+
   // ── Evaluación ─────────────────────────────────────────────
   function evaluateGuess(guess) {
     const result   = Array(WORD_LENGTH).fill("absent");
@@ -195,9 +278,9 @@
       if (result[i] === "correct") continue;
       const idx = solArr.findIndex((l, j) => l === guestArr[i] && !used[j]);
       if (idx !== -1) {
-        result[i]    = "present";
-        used[idx]    = true;
-        solArr[idx]  = null;
+        result[i]   = "present";
+        used[idx]   = true;
+        solArr[idx] = null;
       }
     }
     return result;
@@ -206,7 +289,7 @@
   // ── Animaciones ────────────────────────────────────────────
   function revealRow(row, guess, result, callback) {
     for (let c = 0; c < WORD_LENGTH; c++) {
-      const tile = getTile(row, c);
+      const tile  = getTile(row, c);
       const delay = c * FLIP_DELAY;
       setTimeout(() => {
         tile.classList.add("revealed", result[c]);
@@ -241,7 +324,7 @@
     const priority = { correct: 3, present: 2, absent: 1 };
     for (let i = 0; i < WORD_LENGTH; i++) {
       const letter = guess[i];
-      const btn = document.querySelector(`#keyboard button[data-key="${letter}"]`);
+      const btn    = document.querySelector(`#keyboard button[data-key="${letter}"]`);
       if (!btn) continue;
       const current = btn.dataset.state || "";
       if ((priority[result[i]] || 0) > (priority[current] || 0)) {
@@ -273,7 +356,6 @@
   window.openModal  = function(id) { document.getElementById(id).classList.remove("hidden"); };
   window.closeModal = function(id) { document.getElementById(id).classList.add("hidden"); };
 
-  // Cerrar al clicar fuera
   document.querySelectorAll(".modal").forEach(m => {
     m.addEventListener("click", e => { if (e.target === m) closeModal(m.id); });
   });
@@ -305,9 +387,9 @@
   }
 
   function renderStats(highlightRow) {
-    document.getElementById("stat-played").textContent  = stats.played;
-    document.getElementById("stat-win").textContent     = stats.played ? Math.round(stats.wins / stats.played * 100) : 0;
-    document.getElementById("stat-streak").textContent  = stats.streak;
+    document.getElementById("stat-played").textContent     = stats.played;
+    document.getElementById("stat-win").textContent        = stats.played ? Math.round(stats.wins / stats.played * 100) : 0;
+    document.getElementById("stat-streak").textContent     = stats.streak;
     document.getElementById("stat-max-streak").textContent = stats.maxStreak;
 
     const container = document.getElementById("guess-distribution");
@@ -325,11 +407,9 @@
         </div>`;
       container.appendChild(row);
     }
-
     document.getElementById("next-word-container").classList.remove("hidden");
   }
 
-  // Abre modal de stats mostrando datos actuales (sin registrar nueva partida)
   const statsBtn = document.querySelector('[onclick="openModal(\'modal-stats\')"]');
   if (statsBtn) {
     statsBtn.addEventListener("click", () => {
@@ -351,9 +431,9 @@
     const midnight = new Date();
     midnight.setHours(24, 0, 0, 0);
     const diff = midnight - now;
-    const h = String(Math.floor(diff / 3600000)).padStart(2, "0");
-    const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, "0");
-    const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, "0");
+    const h = String(Math.floor(diff / 3600000)).padStart(2,"0");
+    const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2,"0");
+    const s = String(Math.floor((diff % 60000) / 1000)).padStart(2,"0");
     const el = document.getElementById("countdown");
     if (el) el.textContent = `${h}:${m}:${s}`;
   }
@@ -375,7 +455,6 @@
 
   function restoreState(saved) {
     state = { ...state, ...saved };
-    // Repintar tablero
     for (let r = 0; r < saved.guesses.length; r++) {
       const guess  = saved.guesses[r];
       const result = evaluateGuess(guess);
