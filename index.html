@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WORDLE ES</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🟩</text></svg>" />
+</head>
+<body>
+
+  <!-- MODAL: Instrucciones -->
+  <div id="modal-help" class="modal hidden">
+    <div class="modal-box">
+      <button class="modal-close" onclick="closeModal('modal-help')">✕</button>
+      <h2>Cómo jugar</h2>
+      <p>Adivina la <strong>PALABRA</strong> en 6 intentos.</p>
+      <ul>
+        <li>Cada intento debe ser una palabra válida de 5 letras.</li>
+        <li>El color de las casillas cambia tras cada intento.</li>
+      </ul>
+      <div class="example-row">
+        <div class="tile correct">G</div>
+        <div class="tile">A</div>
+        <div class="tile">T</div>
+        <div class="tile">O</div>
+        <div class="tile">S</div>
+      </div>
+      <p><span class="color-dot correct-dot"></span> <strong>G</strong> está en la posición correcta.</p>
+      <div class="example-row">
+        <div class="tile">V</div>
+        <div class="tile present">I</div>
+        <div class="tile">D</div>
+        <div class="tile">A</div>
+        <div class="tile">S</div>
+      </div>
+      <p><span class="color-dot present-dot"></span> <strong>I</strong> está en la palabra pero en otro lugar.</p>
+      <div class="example-row">
+        <div class="tile">L</div>
+        <div class="tile">U</div>
+        <div class="tile absent">N</div>
+        <div class="tile">A</div>
+        <div class="tile">S</div>
+      </div>
+      <p><span class="color-dot absent-dot"></span> <strong>N</strong> no está en la palabra.</p>
+      <hr/>
+      <p>Una nueva palabra cada día.</p>
+    </div>
+  </div>
+
+  <!-- MODAL: Estadísticas -->
+  <div id="modal-stats" class="modal hidden">
+    <div class="modal-box">
+      <button class="modal-close" onclick="closeModal('modal-stats')">✕</button>
+      <h2>Estadísticas</h2>
+      <div class="stats-grid">
+        <div class="stat-item"><span id="stat-played">0</span><label>Jugadas</label></div>
+        <div class="stat-item"><span id="stat-win">0</span><label>% Victorias</label></div>
+        <div class="stat-item"><span id="stat-streak">0</span><label>Racha</label></div>
+        <div class="stat-item"><span id="stat-max-streak">0</span><label>Racha máx.</label></div>
+      </div>
+      <h3>Distribución de intentos</h3>
+      <div id="guess-distribution"></div>
+      <div id="next-word-container" class="hidden">
+        <hr/>
+        <p class="next-label">Próxima palabra en:</p>
+        <div id="countdown" class="countdown">00:00:00</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- HEADER -->
+  <header>
+    <button class="icon-btn" onclick="openModal('modal-help')" title="Ayuda">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    </button>
+    <h1>WORDLE <span>ES</span></h1>
+    <button class="icon-btn" onclick="openModal('modal-stats')" title="Estadísticas">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+    </button>
+  </header>
+
+  <!-- TABLERO -->
+  <main>
+    <div id="board-container">
+      <div id="board"></div>
+    </div>
+
+    <!-- TECLADO QWERTY -->
+    <div id="keyboard">
+      <div class="kb-row">
+        <button data-key="Q">Q</button>
+        <button data-key="W">W</button>
+        <button data-key="E">E</button>
+        <button data-key="R">R</button>
+        <button data-key="T">T</button>
+        <button data-key="Y">Y</button>
+        <button data-key="U">U</button>
+        <button data-key="I">I</button>
+        <button data-key="O">O</button>
+        <button data-key="P">P</button>
+      </div>
+      <div class="kb-row">
+        <button data-key="A">A</button>
+        <button data-key="S">S</button>
+        <button data-key="D">D</button>
+        <button data-key="F">F</button>
+        <button data-key="G">G</button>
+        <button data-key="H">H</button>
+        <button data-key="J">J</button>
+        <button data-key="K">K</button>
+        <button data-key="L">L</button>
+        <button data-key="Ñ">Ñ</button>
+      </div>
+      <div class="kb-row">
+        <button data-key="ENTER" class="key-wide">ENTER</button>
+        <button data-key="Z">Z</button>
+        <button data-key="X">X</button>
+        <button data-key="C">C</button>
+        <button data-key="V">V</button>
+        <button data-key="B">B</button>
+        <button data-key="N">N</button>
+        <button data-key="M">M</button>
+        <button data-key="BACKSPACE" class="key-wide">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+            <path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"/><line x1="18" y1="9" x2="12" y2="15"/><line x1="12" y1="9" x2="18" y2="15"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <script src="words.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
