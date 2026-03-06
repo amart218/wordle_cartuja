@@ -11,7 +11,7 @@
 //    3. ¡Listo! El juego asigna una palabra distinta cada día.
 // =============================================================
 
-const START_DATE = "2025-03-01"; // ← Fecha del primer elemento
+const START_DATE = "2026-03-01"; // ← Fecha del primer elemento
 
 // Palabras diarias — añade, quita o reordena a tu gusto
 const DAILY_WORDS = [
