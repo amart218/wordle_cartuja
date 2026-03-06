@@ -17,7 +17,7 @@
   const CACHE_KEY     = "wordlees_wordcache";
 
   // ► Pega aquí la URL de tu Google Apps Script desplegado
-  const DAILY_API_URL = "https://script.google.com/macros/s/AKfycbxrBbk7tc2tBSZ1b5838vu14nU0e0ubzJmnzrl2cydhzEZBdCpIJPnrJ30NlWj_ludYWQ/exec";
+  const DAILY_API_URL = "https://script.google.com/macros/s/AKfycbyviDowUXZNpYayZCd2Nd40dO5W1HlpvNhbpQGW8Eyyiz8-lJQsAQqjrLjnA5FFCGxo/exec";
 
   // Wiktionary para validar intentos
   const WIKTIONARY_API = "https://es.wiktionary.org/w/api.php";
