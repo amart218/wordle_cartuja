@@ -19,7 +19,7 @@
   const PLAYER_KEY    = "wordlees_player";
 
   // ► Pega aquí la URL de tu Google Apps Script desplegado
-  const DAILY_API_URL = "https://script.google.com/macros/s/TU_DEPLOYMENT_ID/exec";
+  const DAILY_API_URL = "https://script.google.com/macros/s/AKfycbw0rsUPrTGEFirvdnKlIUQ1ZsGAy0slAPeWDkEUFHIGRRum5pgLJYlnTeqUA-_8fkTlbA/exec";
 
   const WIKTIONARY_API = "https://es.wiktionary.org/w/api.php";
 
