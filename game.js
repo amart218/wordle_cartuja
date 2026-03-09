@@ -19,7 +19,7 @@
   const PLAYER_KEY    = "wordlees_player";
 
   // ► Pega aquí la URL de tu Google Apps Script desplegado
-  const DAILY_API_URL = "https://script.google.com/macros/s/AKfycbxrZuNuT_2E5B6lbD11iUuKmdIUNyXS2QEl-XXtRmCRAl2VvqPP9XX0ycvp4pXjzpYq1Q/exec";
+  const DAILY_API_URL = "https://script.google.com/macros/s/AKfycbw6k7epJmM6LTxLhIHgt5J2ymmM6XHR6pnmQPf9ANdobd200l59CgULYIM9FyQFpgha4g/exec";
 
   const WIKTIONARY_API = "https://es.wiktionary.org/w/api.php";
 
