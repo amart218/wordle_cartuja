@@ -2,6 +2,7 @@
 //  game.js — Lógica principal de WORDLE ES
 //  - Palabra diaria: Google Apps Script (backend privado)
 //  - Validación de intentos: API de Wiktionary (español)
+//  - Registro de resultados: Google Sheets via Apps Script
 // =============================================================
 
 (function () {
@@ -15,14 +16,14 @@
   const STORAGE_KEY   = "wordlees_state";
   const STATS_KEY     = "wordlees_stats";
   const CACHE_KEY     = "wordlees_wordcache";
+  const PLAYER_KEY    = "wordlees_player";
 
   // ► Pega aquí la URL de tu Google Apps Script desplegado
-  const DAILY_API_URL = "https://script.google.com/macros/s/AKfycbyviDowUXZNpYayZCd2Nd40dO5W1HlpvNhbpQGW8Eyyiz8-lJQsAQqjrLjnA5FFCGxo/exec";
+  const DAILY_API_URL = "https://script.google.com/macros/s/TU_DEPLOYMENT_ID/exec";
 
-  // Wiktionary para validar intentos
   const WIKTIONARY_API = "https://es.wiktionary.org/w/api.php";
 
-  // ── Caché de validación (sessionStorage) ───────────────────
+  // ── Caché de validación ────────────────────────────────────
   let wordCache = {};
 
   function loadCache() {
@@ -57,6 +58,29 @@
     dist      : { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0 },
   };
 
+  // ── Cronómetro ─────────────────────────────────────────────
+  let startTime   = null;
+  let elapsedSecs = 0;
+
+  function startTimer() {
+    startTime = Date.now();
+  }
+
+  function stopTimer() {
+    if (!startTime) return 0;
+    elapsedSecs = Math.floor((Date.now() - startTime) / 1000);
+    startTime   = null;
+    return elapsedSecs;
+  }
+
+  function formatTime(secs) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m > 0
+      ? `${m}m ${String(s).padStart(2,"0")}s`
+      : `${s}s`;
+  }
+
   // ── Init ───────────────────────────────────────────────────
   async function init() {
     loadCache();
@@ -77,6 +101,7 @@
         restoreState(saved);
       } else {
         clearSavedState();
+        startTimer(); // ← arranca el cronómetro en partida nueva
       }
     } catch (err) {
       showLoadingScreen(false);
@@ -85,14 +110,12 @@
     }
   }
 
-  // ── Fetch palabra diaria desde Google Apps Script ──────────
+  // ── Fetch palabra diaria ───────────────────────────────────
   async function fetchDailyWord() {
-    // Primero comprobamos si ya la tenemos en localStorage de hoy
     const cached = loadSavedState();
     if (cached && cached.savedDate === getTodayStr() && cached.solution) {
       return cached.solution;
     }
-
     const res  = await fetch(DAILY_API_URL);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -100,15 +123,14 @@
     return data.word.toUpperCase().trim();
   }
 
-  // ── UI de carga ────────────────────────────────────────────
+  // ── UI de carga / error ────────────────────────────────────
   function showLoadingScreen(visible) {
-    let el = document.getElementById("loading-screen");
-    if (!el) return;
-    el.classList.toggle("hidden", !visible);
+    const el = document.getElementById("loading-screen");
+    if (el) el.classList.toggle("hidden", !visible);
   }
 
   function showError(msg) {
-    let el = document.getElementById("error-screen");
+    const el = document.getElementById("error-screen");
     if (!el) return;
     el.querySelector(".error-msg").textContent = msg;
     el.classList.remove("hidden");
@@ -190,9 +212,7 @@
 
     state.locked = true;
     setLoadingRow(state.currentRow, true);
-
     const valid = await isValidWord(guess);
-
     setLoadingRow(state.currentRow, false);
     state.locked = false;
 
@@ -210,22 +230,26 @@
       const won = guess === state.solution;
       if (won) {
         state.gameOver = true;
-        state.won = true;
+        state.won      = true;
+        const secs     = stopTimer();
+        state.elapsedSecs = secs;
         bounceRow(state.currentRow);
         setTimeout(() => {
           const msgs = ["¡Brillante!","¡Increíble!","¡Magnífico!","¡Genial!","¡Bien hecho!","¡Uf, por poco!"];
           showToast(msgs[Math.min(state.currentRow, msgs.length - 1)], 2500);
-          setTimeout(() => endGame(true, state.currentRow + 1), 1500);
+          setTimeout(() => endGame(true, state.currentRow + 1, secs), 1500);
         }, 300);
       } else {
         state.currentRow++;
         state.currentCol = 0;
         if (state.currentRow >= MAX_GUESSES) {
           state.gameOver = true;
-          state.won = false;
+          state.won      = false;
+          const secs     = stopTimer();
+          state.elapsedSecs = secs;
           setTimeout(() => {
             showToast(state.solution, 4000);
-            setTimeout(() => endGame(false, null), 2000);
+            setTimeout(() => endGame(false, null, secs), 2000);
           }, 300);
         }
       }
@@ -237,26 +261,20 @@
   async function isValidWord(word) {
     const normalized = word.toLowerCase();
     if (normalized in wordCache) return wordCache[normalized];
-
     try {
       const params = new URLSearchParams({
-        action : "query",
-        titles : normalized,
-        format : "json",
-        origin : "*",
+        action: "query", titles: normalized, format: "json", origin: "*",
       });
-      const res  = await fetch(`${WIKTIONARY_API}?${params}`);
+      const res    = await fetch(`${WIKTIONARY_API}?${params}`);
       if (!res.ok) throw new Error("network");
-      const data  = await res.json();
-      const pages = data?.query?.pages ?? {};
-      const page  = Object.values(pages)[0];
+      const data   = await res.json();
+      const pages  = data?.query?.pages ?? {};
+      const page   = Object.values(pages)[0];
       const exists = page && !("missing" in page);
       wordCache[normalized] = exists;
       saveCache();
       return exists;
-    } catch (_) {
-      return true; // Si falla la red, aceptamos la palabra
-    }
+    } catch (_) { return true; }
   }
 
   function setLoadingRow(row, loading) {
@@ -274,19 +292,13 @@
 
     for (let i = 0; i < WORD_LENGTH; i++) {
       if (guestArr[i] === solArr[i]) {
-        result[i] = "correct";
-        used[i]   = true;
-        solArr[i] = null;
+        result[i] = "correct"; used[i] = true; solArr[i] = null;
       }
     }
     for (let i = 0; i < WORD_LENGTH; i++) {
       if (result[i] === "correct") continue;
       const idx = solArr.findIndex((l, j) => l === guestArr[i] && !used[j]);
-      if (idx !== -1) {
-        result[i]   = "present";
-        used[idx]   = true;
-        solArr[idx] = null;
-      }
+      if (idx !== -1) { result[i] = "present"; used[idx] = true; solArr[idx] = null; }
     }
     return result;
   }
@@ -336,10 +348,83 @@
   }
 
   // ── End Game ───────────────────────────────────────────────
-  function endGame(won, attempts) {
+  function endGame(won, attempts, secs) {
     updateStats(won, attempts);
-    openModal("modal-stats");
-    startCountdown();
+
+    // ¿Ya registró hoy? Si no, pedir nombre
+    const alreadySent = loadSavedState()?.resultSent;
+    if (!alreadySent) {
+      openRegisterModal(won, attempts, secs);
+    } else {
+      openModal("modal-stats");
+      startCountdown();
+    }
+  }
+
+  // ── Modal de registro ──────────────────────────────────────
+  function openRegisterModal(won, attempts, secs) {
+    const savedName = localStorage.getItem(PLAYER_KEY) || "";
+    const input     = document.getElementById("player-name-input");
+    if (input) input.value = savedName;
+
+    // Mostrar resumen en el modal
+    const summary = document.getElementById("register-summary");
+    if (summary) {
+      const timeStr = formatTime(secs || 0);
+      summary.innerHTML = won
+        ? `🟩 ¡Adivinada en <strong>${attempts} ${attempts === 1 ? "intento" : "intentos"}</strong> · ⏱ ${timeStr}`
+        : `⬛ No adivinada · ⏱ ${timeStr}`;
+    }
+
+    // Guardar datos para enviar al pulsar el botón
+    document.getElementById("btn-register").onclick = () => {
+      const name = (input?.value || "").trim();
+      if (!name) { input?.focus(); return; }
+      localStorage.setItem(PLAYER_KEY, name);
+      submitResult(name, won, attempts, secs);
+    };
+
+    // Saltar registro
+    document.getElementById("btn-skip-register").onclick = () => {
+      closeModal("modal-register");
+      openModal("modal-stats");
+      startCountdown();
+    };
+
+    openModal("modal-register");
+  }
+
+  // ── Enviar resultado a Google Sheets ──────────────────────
+  async function submitResult(name, won, attempts, secs) {
+    const btn = document.getElementById("btn-register");
+    if (btn) { btn.disabled = true; btn.textContent = "Enviando…"; }
+
+    try {
+      const params = new URLSearchParams({
+        action   : "register",
+        player   : name,
+        date     : getTodayStr(),
+        word     : state.solution,
+        won      : won ? "1" : "0",
+        attempts : attempts || 0,
+        seconds  : secs || 0,
+      });
+
+      await fetch(`${DAILY_API_URL}?${params}`);
+
+      // Marcar como enviado para no volver a pedir
+      const saved = loadSavedState() || {};
+      saved.resultSent = true;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+
+      closeModal("modal-register");
+      showToast("¡Resultado guardado! 🎉", 2000);
+      setTimeout(() => { openModal("modal-stats"); startCountdown(); }, 500);
+
+    } catch (_) {
+      if (btn) { btn.disabled = false; btn.textContent = "Guardar"; }
+      showToast("Error al guardar. Inténtalo de nuevo.", 2500);
+    }
   }
 
   // ── Toast ──────────────────────────────────────────────────
@@ -442,8 +527,7 @@
   function saveState() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        ...state,
-        savedDate: getTodayStr()
+        ...state, savedDate: getTodayStr()
       }));
     } catch (_) {}
   }
@@ -457,7 +541,6 @@
   }
 
   function restoreState(saved) {
-    // Preservamos la solution ya cargada desde la API
     const solution = state.solution;
     state = { ...state, ...saved, solution };
 
