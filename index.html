@@ -9,15 +9,16 @@
 </head>
 <body>
 
-  <!-- MODAL: Registro de resultado -->
+
+  <!-- MODAL: Registro de jugador (antes de jugar) -->
   <div id="modal-register" class="modal hidden">
     <div class="modal-box">
       <h2>¿Quién eres? 👤</h2>
-      <p style="text-align:center" id="register-summary"></p>
+      <p class="register-subtitle" id="register-subtitle">Introduce tu nombre para comenzar. Tu resultado se guardará automáticamente al terminar.</p>
       <div class="register-form">
         <input id="player-name-input" type="text" placeholder="Tu nombre" maxlength="30" autocomplete="off" spellcheck="false" />
-        <button id="btn-register" class="btn-primary">Guardar resultado</button>
-        <button id="btn-skip-register" class="btn-ghost">Saltar</button>
+        <button id="btn-register" class="btn-primary">¡Jugar!</button>
+        <button id="btn-skip-register" class="btn-ghost hidden">Saltar</button>
       </div>
     </div>
   </div>
