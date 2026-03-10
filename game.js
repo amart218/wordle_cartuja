@@ -1,14 +1,13 @@
 // =============================================================
 //  game.js — Lógica principal de WORDLE ES
-//  - Palabra diaria: Google Apps Script (backend privado)
-//  - Validación de intentos: API de Wiktionary (español)
-//  - Registro de resultados: Google Sheets via Apps Script
+//  Flujo anti-trampa:
+//  1. Carga palabra → pide nombre → empieza partida
+//  2. Al terminar → guarda resultado automáticamente
 // =============================================================
 
 (function () {
   "use strict";
 
-  // ── Constantes ─────────────────────────────────────────────
   const WORD_LENGTH   = 5;
   const MAX_GUESSES   = 6;
   const FLIP_DURATION = 500;
@@ -19,27 +18,23 @@
   const PLAYER_KEY    = "wordlees_player";
 
   // ► Pega aquí la URL de tu Google Apps Script desplegado
-  const DAILY_API_URL = "https://script.google.com/macros/s/AKfycbw6k7epJmM6LTxLhIHgt5J2ymmM6XHR6pnmQPf9ANdobd200l59CgULYIM9FyQFpgha4g/exec";
-
+  const DAILY_API_URL  = "https://script.google.com/macros/s/TU_DEPLOYMENT_ID/exec";
   const WIKTIONARY_API = "https://es.wiktionary.org/w/api.php";
 
   // ── Caché de validación ────────────────────────────────────
   let wordCache = {};
 
   function loadCache() {
-    try {
-      const raw = sessionStorage.getItem(CACHE_KEY);
-      if (raw) wordCache = JSON.parse(raw);
-    } catch (_) {}
+    try { const r = sessionStorage.getItem(CACHE_KEY); if (r) wordCache = JSON.parse(r); } catch (_) {}
   }
-
   function saveCache() {
     try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(wordCache)); } catch (_) {}
   }
 
-  // ── Estado del juego ───────────────────────────────────────
+  // ── Estado ─────────────────────────────────────────────────
   let state = {
     solution  : "",
+    playerName: "",
     guesses   : [],
     currentRow: 0,
     currentCol: 0,
@@ -47,38 +42,28 @@
     won       : false,
     savedDate : "",
     locked    : false,
+    resultSent: false,
+    elapsedSecs: 0,
   };
 
-  // ── Stats ──────────────────────────────────────────────────
   let stats = {
-    played    : 0,
-    wins      : 0,
-    streak    : 0,
-    maxStreak : 0,
-    dist      : { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0 },
+    played: 0, wins: 0, streak: 0, maxStreak: 0,
+    dist: { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0 },
   };
 
   // ── Cronómetro ─────────────────────────────────────────────
-  let startTime   = null;
-  let elapsedSecs = 0;
+  let startTime = null;
 
-  function startTimer() {
-    startTime = Date.now();
+  function startTimer()  { startTime = Date.now(); }
+  function stopTimer()   {
+    if (!startTime) return state.elapsedSecs || 0;
+    state.elapsedSecs = Math.floor((Date.now() - startTime) / 1000);
+    startTime = null;
+    return state.elapsedSecs;
   }
-
-  function stopTimer() {
-    if (!startTime) return 0;
-    elapsedSecs = Math.floor((Date.now() - startTime) / 1000);
-    startTime   = null;
-    return elapsedSecs;
-  }
-
-  function formatTime(secs) {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return m > 0
-      ? `${m}m ${String(s).padStart(2,"0")}s`
-      : `${s}s`;
+  function formatTime(s) {
+    const m = Math.floor(s / 60), sec = s % 60;
+    return m > 0 ? `${m}m ${String(sec).padStart(2,"0")}s` : `${sec}s`;
   }
 
   // ── Init ───────────────────────────────────────────────────
@@ -88,7 +73,6 @@
     buildBoard();
     attachKeyboard();
     document.addEventListener("keydown", handleKeyDown);
-
     showLoadingScreen(true);
 
     try {
@@ -98,82 +82,100 @@
 
       const saved = loadSavedState();
       if (saved && saved.savedDate === getTodayStr()) {
+        // Partida ya iniciada hoy — restaurar sin pedir nombre
         restoreState(saved);
       } else {
+        // Partida nueva — pedir nombre antes de empezar
         clearSavedState();
-        startTimer(); // ← arranca el cronómetro en partida nueva
+        askPlayerName();
       }
     } catch (err) {
       showLoadingScreen(false);
       showError("No se pudo cargar la palabra de hoy. Inténtalo de nuevo.");
-      console.error("Error cargando palabra diaria:", err);
+      console.error(err);
     }
   }
 
   // ── Fetch palabra diaria ───────────────────────────────────
   async function fetchDailyWord() {
     const cached = loadSavedState();
-    if (cached && cached.savedDate === getTodayStr() && cached.solution) {
-      return cached.solution;
-    }
+    if (cached && cached.savedDate === getTodayStr() && cached.solution) return cached.solution;
     const res  = await fetch(DAILY_API_URL);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    if (!data.word) throw new Error("Respuesta inválida de la API");
+    if (!data.word) throw new Error("Respuesta inválida");
     return data.word.toUpperCase().trim();
   }
 
-  // ── UI de carga / error ────────────────────────────────────
-  function showLoadingScreen(visible) {
-    const el = document.getElementById("loading-screen");
-    if (el) el.classList.toggle("hidden", !visible);
+  // ── Pedir nombre ANTES de jugar ────────────────────────────
+  function askPlayerName() {
+    const savedName = localStorage.getItem(PLAYER_KEY) || "";
+    const input     = document.getElementById("player-name-input");
+    const subtitle  = document.getElementById("register-subtitle");
+
+    if (input) input.value = savedName;
+    if (subtitle) subtitle.textContent = "Introduce tu nombre para comenzar. Tu resultado se guardará automáticamente al terminar.";
+
+    // Ocultar botón "Saltar" — obligatorio registrarse antes de jugar
+    const skipBtn = document.getElementById("btn-skip-register");
+    if (skipBtn) skipBtn.classList.add("hidden");
+
+    document.getElementById("btn-register").onclick = () => {
+      const name = (input?.value || "").trim();
+      if (!name) { input?.focus(); showToast("Escribe tu nombre para continuar"); return; }
+      localStorage.setItem(PLAYER_KEY, name);
+      state.playerName = name;
+      closeModal("modal-register");
+      startTimer();
+      saveState(); // guarda el nombre en el estado desde el inicio
+    };
+
+    openModal("modal-register");
   }
 
+  // ── UI auxiliar ────────────────────────────────────────────
+  function showLoadingScreen(v) {
+    const el = document.getElementById("loading-screen");
+    if (el) el.classList.toggle("hidden", !v);
+  }
   function showError(msg) {
     const el = document.getElementById("error-screen");
     if (!el) return;
     el.querySelector(".error-msg").textContent = msg;
     el.classList.remove("hidden");
   }
-
-  function getTodayStr() {
-    return new Date().toISOString().slice(0, 10);
-  }
+  function getTodayStr() { return new Date().toISOString().slice(0,10); }
 
   // ── Board ──────────────────────────────────────────────────
   function buildBoard() {
     const board = document.getElementById("board");
     board.innerHTML = "";
-    for (let r = 0; r < MAX_GUESSES; r++) {
+    for (let r = 0; r < MAX_GUESSES; r++)
       for (let c = 0; c < WORD_LENGTH; c++) {
-        const tile = document.createElement("div");
-        tile.classList.add("tile");
-        tile.id = `tile-${r}-${c}`;
-        board.appendChild(tile);
+        const t = document.createElement("div");
+        t.classList.add("tile");
+        t.id = `tile-${r}-${c}`;
+        board.appendChild(t);
       }
-    }
   }
-
-  function getTile(row, col) {
-    return document.getElementById(`tile-${row}-${col}`);
-  }
+  function getTile(r, c) { return document.getElementById(`tile-${r}-${c}`); }
 
   // ── Teclado ────────────────────────────────────────────────
   function attachKeyboard() {
-    document.querySelectorAll("#keyboard button").forEach(btn => {
-      btn.addEventListener("click", () => handleKey(btn.dataset.key));
-    });
+    document.querySelectorAll("#keyboard button").forEach(btn =>
+      btn.addEventListener("click", () => handleKey(btn.dataset.key))
+    );
   }
-
   function handleKeyDown(e) {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const key = e.key.toUpperCase();
-    if (key === "ENTER")     return handleKey("ENTER");
-    if (key === "BACKSPACE") return handleKey("BACKSPACE");
-    if (/^[A-ZÁÉÍÓÚÑÜ]$/.test(key)) handleKey(key);
+    const k = e.key.toUpperCase();
+    if (k === "ENTER") return handleKey("ENTER");
+    if (k === "BACKSPACE") return handleKey("BACKSPACE");
+    if (/^[A-ZÁÉÍÓÚÑÜ]$/.test(k)) handleKey(k);
   }
-
   function handleKey(key) {
+    // Bloquear si no hay nombre registrado aún
+    if (!state.playerName && !state.gameOver) return;
     if (state.gameOver || state.locked || !state.solution) return;
     if (key === "ENTER")     return submitGuess();
     if (key === "BACKSPACE") return deleteLetter();
@@ -183,32 +185,25 @@
   // ── Escritura ──────────────────────────────────────────────
   function typeLetter(letter) {
     if (state.currentCol >= WORD_LENGTH) return;
-    const tile = getTile(state.currentRow, state.currentCol);
-    tile.textContent = letter;
-    tile.classList.add("filled");
+    const t = getTile(state.currentRow, state.currentCol);
+    t.textContent = letter;
+    t.classList.add("filled");
     state.currentCol++;
   }
-
   function deleteLetter() {
     if (state.currentCol <= 0) return;
     state.currentCol--;
-    const tile = getTile(state.currentRow, state.currentCol);
-    tile.textContent = "";
-    tile.classList.remove("filled");
+    const t = getTile(state.currentRow, state.currentCol);
+    t.textContent = "";
+    t.classList.remove("filled");
   }
 
   // ── Submit ─────────────────────────────────────────────────
   async function submitGuess() {
-    if (state.currentCol < WORD_LENGTH) {
-      showToast("Faltan letras");
-      shakeRow(state.currentRow);
-      return;
-    }
+    if (state.currentCol < WORD_LENGTH) { showToast("Faltan letras"); shakeRow(state.currentRow); return; }
 
     let guess = "";
-    for (let c = 0; c < WORD_LENGTH; c++) {
-      guess += getTile(state.currentRow, c).textContent;
-    }
+    for (let c = 0; c < WORD_LENGTH; c++) guess += getTile(state.currentRow, c).textContent;
 
     state.locked = true;
     setLoadingRow(state.currentRow, true);
@@ -216,11 +211,7 @@
     setLoadingRow(state.currentRow, false);
     state.locked = false;
 
-    if (!valid) {
-      showToast("Palabra no encontrada");
-      shakeRow(state.currentRow);
-      return;
-    }
+    if (!valid) { showToast("Palabra no encontrada"); shakeRow(state.currentRow); return; }
 
     state.guesses.push(guess);
     const result = evaluateGuess(guess);
@@ -228,11 +219,11 @@
     revealRow(state.currentRow, guess, result, () => {
       updateKeyboard(guess, result);
       const won = guess === state.solution;
+
       if (won) {
         state.gameOver = true;
         state.won      = true;
         const secs     = stopTimer();
-        state.elapsedSecs = secs;
         bounceRow(state.currentRow);
         setTimeout(() => {
           const msgs = ["¡Brillante!","¡Increíble!","¡Magnífico!","¡Genial!","¡Bien hecho!","¡Uf, por poco!"];
@@ -246,7 +237,6 @@
           state.gameOver = true;
           state.won      = false;
           const secs     = stopTimer();
-          state.elapsedSecs = secs;
           setTimeout(() => {
             showToast(state.solution, 4000);
             setTimeout(() => endGame(false, null, secs), 2000);
@@ -257,89 +247,105 @@
     });
   }
 
-  // ── Validación via Wiktionary ──────────────────────────────
+  // ── Validación Wiktionary ──────────────────────────────────
   async function isValidWord(word) {
-    const normalized = word.toLowerCase();
-    if (normalized in wordCache) return wordCache[normalized];
+    const n = word.toLowerCase();
+    if (n in wordCache) return wordCache[n];
     try {
-      const params = new URLSearchParams({
-        action: "query", titles: normalized, format: "json", origin: "*",
-      });
-      const res    = await fetch(`${WIKTIONARY_API}?${params}`);
-      if (!res.ok) throw new Error("network");
-      const data   = await res.json();
-      const pages  = data?.query?.pages ?? {};
-      const page   = Object.values(pages)[0];
-      const exists = page && !("missing" in page);
-      wordCache[normalized] = exists;
-      saveCache();
-      return exists;
+      const p = new URLSearchParams({ action:"query", titles:n, format:"json", origin:"*" });
+      const res = await fetch(`${WIKTIONARY_API}?${p}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      const page = Object.values(data?.query?.pages ?? {})[0];
+      const ok   = page && !("missing" in page);
+      wordCache[n] = ok; saveCache(); return ok;
     } catch (_) { return true; }
   }
 
   function setLoadingRow(row, loading) {
-    for (let c = 0; c < WORD_LENGTH; c++) {
-      getTile(row, c).classList.toggle("loading", loading);
-    }
+    for (let c = 0; c < WORD_LENGTH; c++) getTile(row, c).classList.toggle("loading", loading);
   }
 
   // ── Evaluación ─────────────────────────────────────────────
   function evaluateGuess(guess) {
-    const result   = Array(WORD_LENGTH).fill("absent");
-    const solArr   = state.solution.split("");
-    const guestArr = guess.split("");
-    const used     = Array(WORD_LENGTH).fill(false);
-
+    const result = Array(WORD_LENGTH).fill("absent");
+    const sol    = state.solution.split("");
+    const g      = guess.split("");
+    const used   = Array(WORD_LENGTH).fill(false);
     for (let i = 0; i < WORD_LENGTH; i++) {
-      if (guestArr[i] === solArr[i]) {
-        result[i] = "correct"; used[i] = true; solArr[i] = null;
-      }
+      if (g[i] === sol[i]) { result[i] = "correct"; used[i] = true; sol[i] = null; }
     }
     for (let i = 0; i < WORD_LENGTH; i++) {
       if (result[i] === "correct") continue;
-      const idx = solArr.findIndex((l, j) => l === guestArr[i] && !used[j]);
-      if (idx !== -1) { result[i] = "present"; used[idx] = true; solArr[idx] = null; }
+      const idx = sol.findIndex((l, j) => l === g[i] && !used[j]);
+      if (idx !== -1) { result[i] = "present"; used[idx] = true; sol[idx] = null; }
     }
     return result;
   }
 
-  // ── Animaciones ────────────────────────────────────────────
-  function revealRow(row, guess, result, callback) {
-    for (let c = 0; c < WORD_LENGTH; c++) {
-      const tile = getTile(row, c);
-      setTimeout(() => tile.classList.add("revealed", result[c]), c * FLIP_DELAY);
+  // ── End Game ───────────────────────────────────────────────
+  function endGame(won, attempts, secs) {
+    updateStats(won, attempts);
+    // Envío automático — el nombre ya está registrado desde el inicio
+    if (!state.resultSent) {
+      submitResult(state.playerName, won, attempts, secs);
     }
-    setTimeout(callback, (WORD_LENGTH - 1) * FLIP_DELAY + FLIP_DURATION);
+    openModal("modal-stats");
+    startCountdown();
   }
 
+  // ── Enviar resultado a Google Sheets (automático) ──────────
+  async function submitResult(name, won, attempts, secs) {
+    try {
+      const params = new URLSearchParams({
+        action  : "register",
+        player  : name || "Anónimo",
+        date    : getTodayStr(),
+        word    : state.solution,
+        won     : won ? "1" : "0",
+        attempts: attempts || 0,
+        seconds : secs || 0,
+      });
+      await fetch(`${DAILY_API_URL}?${params}`);
+      state.resultSent = true;
+      saveState();
+    } catch (err) {
+      console.warn("No se pudo guardar el resultado:", err);
+      // Silencioso: no interrumpir la experiencia del jugador
+    }
+  }
+
+  // ── Animaciones ────────────────────────────────────────────
+  function revealRow(row, guess, result, cb) {
+    for (let c = 0; c < WORD_LENGTH; c++)
+      setTimeout(() => getTile(row, c).classList.add("revealed", result[c]), c * FLIP_DELAY);
+    setTimeout(cb, (WORD_LENGTH - 1) * FLIP_DELAY + FLIP_DURATION);
+  }
   function shakeRow(row) {
     for (let c = 0; c < WORD_LENGTH; c++) {
-      const tile = getTile(row, c);
-      tile.classList.remove("shake");
-      void tile.offsetWidth;
-      tile.classList.add("shake");
-      tile.addEventListener("animationend", () => tile.classList.remove("shake"), { once: true });
+      const t = getTile(row, c);
+      t.classList.remove("shake"); void t.offsetWidth; t.classList.add("shake");
+      t.addEventListener("animationend", () => t.classList.remove("shake"), { once: true });
     }
   }
-
   function bounceRow(row) {
     for (let c = 0; c < WORD_LENGTH; c++) {
-      const tile = getTile(row, c);
+      const t = getTile(row, c);
       setTimeout(() => {
-        tile.classList.add("bounce");
-        tile.addEventListener("animationend", () => tile.classList.remove("bounce"), { once: true });
+        t.classList.add("bounce");
+        t.addEventListener("animationend", () => t.classList.remove("bounce"), { once: true });
       }, c * 100);
     }
   }
 
   // ── Teclado colores ────────────────────────────────────────
   function updateKeyboard(guess, result) {
-    const priority = { correct: 3, present: 2, absent: 1 };
+    const pri = { correct:3, present:2, absent:1 };
     for (let i = 0; i < WORD_LENGTH; i++) {
       const btn = document.querySelector(`#keyboard button[data-key="${guess[i]}"]`);
       if (!btn) continue;
-      const current = btn.dataset.state || "";
-      if ((priority[result[i]] || 0) > (priority[current] || 0)) {
+      const cur = btn.dataset.state || "";
+      if ((pri[result[i]]||0) > (pri[cur]||0)) {
         btn.classList.remove("correct","present","absent");
         btn.classList.add(result[i]);
         btn.dataset.state = result[i];
@@ -347,197 +353,89 @@
     }
   }
 
-  // ── End Game ───────────────────────────────────────────────
-  function endGame(won, attempts, secs) {
-    updateStats(won, attempts);
-
-    // ¿Ya registró hoy? Si no, pedir nombre
-    const alreadySent = loadSavedState()?.resultSent;
-    if (!alreadySent) {
-      openRegisterModal(won, attempts, secs);
-    } else {
-      openModal("modal-stats");
-      startCountdown();
-    }
-  }
-
-  // ── Modal de registro ──────────────────────────────────────
-  function openRegisterModal(won, attempts, secs) {
-    const savedName = localStorage.getItem(PLAYER_KEY) || "";
-    const input     = document.getElementById("player-name-input");
-    if (input) input.value = savedName;
-
-    // Mostrar resumen en el modal
-    const summary = document.getElementById("register-summary");
-    if (summary) {
-      const timeStr = formatTime(secs || 0);
-      summary.innerHTML = won
-        ? `🟩 ¡Adivinada en <strong>${attempts} ${attempts === 1 ? "intento" : "intentos"}</strong> · ⏱ ${timeStr}`
-        : `⬛ No adivinada · ⏱ ${timeStr}`;
-    }
-
-    // Guardar datos para enviar al pulsar el botón
-    document.getElementById("btn-register").onclick = () => {
-      const name = (input?.value || "").trim();
-      if (!name) { input?.focus(); return; }
-      localStorage.setItem(PLAYER_KEY, name);
-      submitResult(name, won, attempts, secs);
-    };
-
-    // Saltar registro
-    document.getElementById("btn-skip-register").onclick = () => {
-      closeModal("modal-register");
-      openModal("modal-stats");
-      startCountdown();
-    };
-
-    openModal("modal-register");
-  }
-
-  // ── Enviar resultado a Google Sheets ──────────────────────
-  async function submitResult(name, won, attempts, secs) {
-    const btn = document.getElementById("btn-register");
-    if (btn) { btn.disabled = true; btn.textContent = "Enviando…"; }
-
-    try {
-      const params = new URLSearchParams({
-        action   : "register",
-        player   : name,
-        date     : getTodayStr(),
-        word     : state.solution,
-        won      : won ? "1" : "0",
-        attempts : attempts || 0,
-        seconds  : secs || 0,
-      });
-
-      await fetch(`${DAILY_API_URL}?${params}`);
-
-      // Marcar como enviado para no volver a pedir
-      const saved = loadSavedState() || {};
-      saved.resultSent = true;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
-
-      closeModal("modal-register");
-      showToast("¡Resultado guardado! 🎉", 2000);
-      setTimeout(() => { openModal("modal-stats"); startCountdown(); }, 500);
-
-    } catch (_) {
-      if (btn) { btn.disabled = false; btn.textContent = "Guardar"; }
-      showToast("Error al guardar. Inténtalo de nuevo.", 2500);
-    }
-  }
-
   // ── Toast ──────────────────────────────────────────────────
   let toastTimer;
-  function showToast(msg, duration = 1500) {
+  function showToast(msg, dur = 1500) {
     const t = document.getElementById("toast");
     clearTimeout(toastTimer);
-    t.textContent = msg;
-    t.classList.remove("hidden");
-    toastTimer = setTimeout(() => t.classList.add("hidden"), duration);
+    t.textContent = msg; t.classList.remove("hidden");
+    toastTimer = setTimeout(() => t.classList.add("hidden"), dur);
   }
 
   // ── Modals ─────────────────────────────────────────────────
   window.openModal  = id => document.getElementById(id).classList.remove("hidden");
   window.closeModal = id => document.getElementById(id).classList.add("hidden");
-
-  document.querySelectorAll(".modal").forEach(m => {
-    m.addEventListener("click", e => { if (e.target === m) closeModal(m.id); });
-  });
+  document.querySelectorAll(".modal").forEach(m =>
+    m.addEventListener("click", e => { if (e.target === m) closeModal(m.id); })
+  );
 
   // ── Stats ──────────────────────────────────────────────────
   function loadStats() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STATS_KEY));
-      if (saved) stats = { ...stats, ...saved };
-    } catch (_) {}
+    try { const s = JSON.parse(localStorage.getItem(STATS_KEY)); if (s) stats = {...stats,...s}; } catch(_){}
   }
-
   function saveStats() {
-    try { localStorage.setItem(STATS_KEY, JSON.stringify(stats)); } catch (_) {}
+    try { localStorage.setItem(STATS_KEY, JSON.stringify(stats)); } catch(_){}
   }
-
   function updateStats(won, attempts) {
     stats.played++;
     if (won) {
-      stats.wins++;
-      stats.streak++;
+      stats.wins++; stats.streak++;
       if (stats.streak > stats.maxStreak) stats.maxStreak = stats.streak;
-      if (attempts) stats.dist[attempts] = (stats.dist[attempts] || 0) + 1;
-    } else {
-      stats.streak = 0;
-    }
+      if (attempts) stats.dist[attempts] = (stats.dist[attempts]||0) + 1;
+    } else { stats.streak = 0; }
     saveStats();
     renderStats(won ? attempts : null);
   }
-
-  function renderStats(highlightRow) {
+  function renderStats(hi) {
     document.getElementById("stat-played").textContent     = stats.played;
-    document.getElementById("stat-win").textContent        = stats.played ? Math.round(stats.wins / stats.played * 100) : 0;
+    document.getElementById("stat-win").textContent        = stats.played ? Math.round(stats.wins/stats.played*100) : 0;
     document.getElementById("stat-streak").textContent     = stats.streak;
     document.getElementById("stat-max-streak").textContent = stats.maxStreak;
-
-    const container = document.getElementById("guess-distribution");
-    container.innerHTML = "";
-    const maxVal = Math.max(1, ...Object.values(stats.dist));
+    const c = document.getElementById("guess-distribution");
+    c.innerHTML = "";
+    const mx = Math.max(1, ...Object.values(stats.dist));
     for (let i = 1; i <= MAX_GUESSES; i++) {
-      const val = stats.dist[i] || 0;
-      const pct = Math.round((val / maxVal) * 100);
+      const v = stats.dist[i]||0, pct = Math.round(v/mx*100);
       const row = document.createElement("div");
       row.classList.add("dist-row");
-      row.innerHTML = `
-        <span class="dist-label">${i}</span>
+      row.innerHTML = `<span class="dist-label">${i}</span>
         <div class="dist-bar-wrap">
-          <div class="dist-bar ${i === highlightRow ? "highlight" : ""}" style="width:${Math.max(pct,7)}%">${val}</div>
+          <div class="dist-bar ${i===hi?"highlight":""}" style="width:${Math.max(pct,7)}%">${v}</div>
         </div>`;
-      container.appendChild(row);
+      c.appendChild(row);
     }
     document.getElementById("next-word-container").classList.remove("hidden");
   }
 
   const statsBtn = document.querySelector('[onclick="openModal(\'modal-stats\')"]');
-  if (statsBtn) {
-    statsBtn.addEventListener("click", () => {
-      renderStats(null);
-      if (state.gameOver) startCountdown();
-    }, { capture: true });
-  }
+  if (statsBtn) statsBtn.addEventListener("click", () => {
+    renderStats(null);
+    if (state.gameOver) startCountdown();
+  }, { capture: true });
 
   // ── Countdown ─────────────────────────────────────────────
   let countdownTimer;
-  function startCountdown() {
-    clearInterval(countdownTimer);
-    tick();
-    countdownTimer = setInterval(tick, 1000);
-  }
-
+  function startCountdown() { clearInterval(countdownTimer); tick(); countdownTimer = setInterval(tick,1000); }
   function tick() {
-    const now      = new Date();
-    const midnight = new Date();
-    midnight.setHours(24, 0, 0, 0);
-    const diff = midnight - now;
-    const h = String(Math.floor(diff / 3600000)).padStart(2,"0");
-    const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2,"0");
-    const s = String(Math.floor((diff % 60000) / 1000)).padStart(2,"0");
+    const now = new Date(), mid = new Date();
+    mid.setHours(24,0,0,0);
+    const d = mid - now;
+    const h = String(Math.floor(d/3600000)).padStart(2,"0");
+    const m = String(Math.floor((d%3600000)/60000)).padStart(2,"0");
+    const s = String(Math.floor((d%60000)/1000)).padStart(2,"0");
     const el = document.getElementById("countdown");
     if (el) el.textContent = `${h}:${m}:${s}`;
   }
 
   // ── Persistencia ───────────────────────────────────────────
   function saveState() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        ...state, savedDate: getTodayStr()
-      }));
-    } catch (_) {}
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({...state, savedDate: getTodayStr()})); } catch(_){}
   }
-
   function loadSavedState() {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch (_) { return null; }
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch(_) { return null; }
   }
-
   function clearSavedState() {
-    try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+    try { localStorage.removeItem(STORAGE_KEY); } catch(_){}
   }
 
   function restoreState(saved) {
@@ -545,24 +443,29 @@
     state = { ...state, ...saved, solution };
 
     for (let r = 0; r < saved.guesses.length; r++) {
-      const guess  = saved.guesses[r];
-      const result = evaluateGuess(guess);
+      const guess = saved.guesses[r], result = evaluateGuess(guess);
       for (let c = 0; c < WORD_LENGTH; c++) {
-        const tile = getTile(r, c);
-        tile.textContent = guess[c];
-        tile.classList.add("filled", "revealed", result[c]);
+        const t = getTile(r, c);
+        t.textContent = guess[c];
+        t.classList.add("filled","revealed",result[c]);
       }
       updateKeyboard(guess, result);
     }
+
     if (state.gameOver) {
       if (state.won) showToast("¡Ya ganaste hoy! 🎉", 3000);
       else showToast(state.solution, 4000);
       renderStats(state.won ? state.guesses.length : null);
       startCountdown();
+    } else if (!state.playerName) {
+      // Caso raro: hay estado guardado pero sin nombre → pedir nombre
+      askPlayerName();
+    } else {
+      // Continuar partida en curso
+      startTimer();
     }
   }
 
-  // ── Arranque ───────────────────────────────────────────────
   document.addEventListener("DOMContentLoaded", init);
 
 })();
