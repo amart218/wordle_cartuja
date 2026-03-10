@@ -553,3 +553,11 @@ main {
 }
 
 .btn-ghost:hover { color: var(--text); border-color: var(--subtext); }
+
+.register-subtitle {
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--subtext);
+  margin-bottom: 4px;
+  line-height: 1.5;
+}
