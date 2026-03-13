@@ -21,10 +21,27 @@
   const DAILY_API_URL  = "https://script.google.com/macros/s/AKfycbx789giZgzY2-mRu9e9qcGedKsFCjZDBFU2YQz8E4gdwBNX7z9pMDFJy7RhEqDdkQcWmQ/exec";
   const WIKTIONARY_API = "https://es.wiktionary.org/w/api.php";
 
-  // Elimina tildes para la consulta a Wiktionary (á→a, é→e, etc.)
-  // La Ñ se conserva porque es una letra distinta en español
-  function stripAccents(str) {
-    return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  // Genera todas las variantes acentuadas posibles de una palabra.
+  // Wiktionary solo reconoce la forma CON tilde (fácil, balón...),
+  // así que si el jugador escribe sin tilde hay que probar todas
+  // las combinaciones posibles de vocales acentuadas.
+  // Ejemplo: "facil" → ["facil","fácil","facíl","fácíl",...]
+  function accentVariants(word) {
+    const map = { a:["a","á"], e:["e","é"], i:["i","í"], o:["o","ó"], u:["u","ú"] };
+    let variants = [word];
+    for (let i = 0; i < word.length; i++) {
+      const ch = word[i];
+      if (!map[ch]) continue;
+      const next = [];
+      for (const v of variants) {
+        for (const acc of map[ch]) {
+          next.push(v.slice(0, i) + acc + v.slice(i + 1));
+        }
+      }
+      variants = next;
+    }
+    // Eliminar duplicados y devolver array único
+    return [...new Set(variants)];
   }
 
   // ── Caché de validación ────────────────────────────────────
@@ -255,27 +272,31 @@
 
   // ── Validación Wiktionary ──────────────────────────────────
   async function isValidWord(word) {
-    const n        = word.toLowerCase();
-    const nAccents = stripAccents(n); // versión sin tildes para la API
-    // Consultar caché con y sin tildes
+    const n = word.toLowerCase();
     if (n in wordCache) return wordCache[n];
-    if (nAccents in wordCache) return wordCache[nAccents];
+
+    // Genera todas las variantes acentuadas (máx. 2^5 = 32 para 5 vocales)
+    const variants = accentVariants(n);
+
     try {
-      // Primero intentamos con tildes (más preciso)
-      // Si no existe, reintentamos sin tildes
-      for (const query of [n, nAccents]) {
-        const p = new URLSearchParams({ action:"query", titles:query, format:"json", origin:"*" });
-        const res = await fetch(`${WIKTIONARY_API}?${p}`);
-        if (!res.ok) throw new Error();
-        const data = await res.json();
-        const page = Object.values(data?.query?.pages ?? {})[0];
-        if (page && !("missing" in page)) {
-          wordCache[n] = true; wordCache[nAccents] = true;
-          saveCache(); return true;
-        }
-      }
-      wordCache[n] = false; wordCache[nAccents] = false;
-      saveCache(); return false;
+      // Wiktionary permite consultar varias páginas en una sola llamada
+      // usando el parámetro titles con "|" como separador
+      const p = new URLSearchParams({
+        action: "query",
+        titles: variants.join("|"),
+        format: "json",
+        origin: "*",
+      });
+      const res  = await fetch(`${WIKTIONARY_API}?${p}`);
+      if (!res.ok) throw new Error();
+      const data  = await res.json();
+      const pages = Object.values(data?.query?.pages ?? {});
+      // Si alguna variante existe (pageid positivo) → válida
+      const found = pages.some(page => !("missing" in page));
+      // Guardar resultado en caché para la forma original
+      wordCache[n] = found;
+      saveCache();
+      return found;
     } catch (_) { return true; }
   }
 
