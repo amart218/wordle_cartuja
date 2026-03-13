@@ -18,7 +18,7 @@
   const PLAYER_KEY    = "wordlees_player";
 
   // ► Pega aquí la URL de tu Google Apps Script desplegado
-  const DAILY_API_URL  = "https://script.google.com/macros/s/AKfycbx789giZgzY2-mRu9e9qcGedKsFCjZDBFU2YQz8E4gdwBNX7z9pMDFJy7RhEqDdkQcWmQ/exec";
+  const DAILY_API_URL  = "https://script.google.com/macros/s/AKfycbws__uaT3FV_fjZAUu2rRlLakIge42uk9HqYdgNeHb--w7d5iFmY4dYSfwGM7yQ1-FnhA/exec";
   const WIKTIONARY_API = "https://es.wiktionary.org/w/api.php";
 
   // Genera todas las variantes acentuadas posibles de una palabra.
