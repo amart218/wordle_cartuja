@@ -143,15 +143,26 @@
     const skipBtn = document.getElementById("btn-skip-register");
     if (skipBtn) skipBtn.classList.add("hidden");
 
-    document.getElementById("btn-register").onclick = () => {
+    function confirmName() {
       const name = (input?.value || "").trim();
       if (!name) { input?.focus(); showToast("Escribe tu nombre para continuar"); return; }
       localStorage.setItem(PLAYER_KEY, name);
       state.playerName = name;
+      // Eliminar listener de Enter al cerrar el modal
+      input.removeEventListener("keydown", onEnterKey);
       closeModal("modal-register");
       startTimer();
-      saveState(); // guarda el nombre en el estado desde el inicio
-    };
+      saveState();
+    }
+
+    function onEnterKey(e) {
+      if (e.key === "Enter") { e.preventDefault(); confirmName(); }
+    }
+
+    document.getElementById("btn-register").onclick = confirmName;
+    input.addEventListener("keydown", onEnterKey);
+    // Enfocar el input automáticamente al abrir el modal
+    setTimeout(() => input?.focus(), 100);
 
     openModal("modal-register");
   }
